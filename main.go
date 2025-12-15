@@ -32,6 +32,6 @@ func main() {
 	peerList, err := networking.GetPeers(&torrent, [20]byte(peerID), uint16(portNum))
 
 	for i, peer := range *peerList {
-		fmt.Printf("Peer [%i]: IP: %v, Port: %v\n", i, peer.IP, peer.Port)
+		fmt.Printf("Peer [%v]: IP: %v, Port: %v\n", i, peer.IP, peer.Port)
 	}
 }
