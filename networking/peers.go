@@ -18,23 +18,39 @@ import (
 )
 
 // NOTE: Create NEW() function to init default values
-type trackerResponse struct {
+type udpResponse struct {
 	Interval uint64 `bencode:"interval"`
-	peers    []byte `bencode:"peers"`
+	Peers    []byte `bencode:"peers"`
+}
+
+type httpResponse struct {
+	Complete   uint64 `bencode:"complete"`
+	Incomplete uint64 `bencode:"incomplete"`
+	Interval   uint64 `bencode:"interval"`
+	Peers      []Peer `bencode:"peers"`
 }
 
 type Peer struct {
-	IP   net.IP
-	Port uint16
+	IP   string   `bencode:"ip"`
+	Port uint16   `bencode:"port"`
+	ID   [20]byte `bencode:"peer id"`
+}
+
+func (p *Peer) GetTCPAddress() string {
+	return net.JoinHostPort(
+		p.IP,
+		strconv.Itoa(int(p.Port)),
+	)
 }
 
 func GetPeers(t *torrentstruct.TorrentType, peerID [20]byte, port uint16) (*[]Peer, error) {
 	protocol, err := url.Parse(t.Announce)
 	if err != nil {
-		log.Fatal(err)
+		log.Println(err)
 		return nil, err
 	}
 
+	fmt.Println(protocol.Scheme)
 	switch protocol.Scheme {
 	case "http", "https":
 		return buildHTTP(t, peerID, port)
@@ -56,8 +72,7 @@ func buildHTTP(t *torrentstruct.TorrentType, peerID [20]byte, port uint16) (*[]P
 		"port":       []string{strconv.Itoa(int(port))},
 		"uploaded":   []string{"0"},
 		"downloaded": []string{"0"},
-		"compact":    []string{"1"},
-		"left":       []string{strconv.Itoa(int(t.Length))},
+		"left":       []string{"0"},
 	}
 
 	base.RawQuery = params.Encode()
@@ -68,25 +83,30 @@ func buildHTTP(t *torrentstruct.TorrentType, peerID [20]byte, port uint16) (*[]P
 func httpQueryTracker(queryString string) (*[]Peer, error) {
 	resp, err := http.Get(queryString)
 	if err != nil {
-		log.Fatal(err)
+		log.Println(err)
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func(Body io.ReadCloser) {
+		err := Body.Close()
+		if err != nil {
+			log.Println(err)
+		}
+	}(resp.Body)
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		log.Fatal(err)
+		log.Println(err)
 		return nil, err
 	}
 
-	trackerResponse := trackerResponse{}
+	httpResponse := httpResponse{}
 
-	err = bencode.Unmarshal(bytes.NewReader(respBody), &trackerResponse)
+	err = bencode.Unmarshal(bytes.NewReader(respBody), &httpResponse)
 	if err != nil {
-		log.Fatal(err)
+		log.Println(err)
 		return nil, err
 	}
 
-	return extractPeers(&trackerResponse)
+	return httpExtractPeers(&httpResponse)
 }
 
 /*
@@ -180,7 +200,7 @@ func buildUDP(t *torrentstruct.TorrentType, peerID [20]byte, port uint16) (*[]Pe
 	announceBuf := make([]byte, 1500) // Hopefully good enough, 1472 theoretical max message size
 	n, err = conn.Read(announceBuf)
 	if err != nil {
-		log.Fatal(err)
+		log.Println(err)
 		return nil, err
 	}
 
@@ -204,32 +224,40 @@ func buildUDP(t *torrentstruct.TorrentType, peerID [20]byte, port uint16) (*[]Pe
 
 	fmt.Printf("\nLeechers : %v |\t", announceLeechers)
 	fmt.Printf("Seeders: %v\n", announceSeeders)
-	trackerResponse := trackerResponse{}
+	trackerResponse := udpResponse{}
 	trackerResponse.Interval = uint64(announceInterval)
-	trackerResponse.peers = announceResp[20:]
+	trackerResponse.Peers = announceResp[20:]
 
-	return extractPeers(&trackerResponse)
+	return udpExtractPeers(&trackerResponse)
 
 }
 
-func extractPeers(tResp *trackerResponse) (*[]Peer, error) {
-	const peerSize = 6 // 4 IP, 2 Port
-	numPeers := len(tResp.peers) / peerSize
+func httpExtractPeers(hResp *httpResponse) (*[]Peer, error) {
+	return &hResp.Peers, nil
+}
+
+func udpExtractPeers(uResp *udpResponse) (*[]Peer, error) {
+	const peerSize = 6 // 4 bytes IP, 2 bytes Port
+	numPeers := len(uResp.Peers) / peerSize
 	fmt.Printf("Number of peers: %d\n", numPeers)
 
-	if len(tResp.peers)%peerSize != 0 {
+	if len(uResp.Peers)%peerSize != 0 {
 		err := fmt.Errorf("malformed peers received from tracker")
 		return nil, err
 	}
-	peers := make([]Peer, 0, len(tResp.peers)/6)
-	for i := 0; i < len(tResp.peers); i += peerSize {
-		ip := net.IPv4(tResp.peers[i], tResp.peers[i+1], tResp.peers[i+2], tResp.peers[i+3])
-		port := binary.BigEndian.Uint16(tResp.peers[i+4 : i+6])
+
+	peers := make([]Peer, 0, numPeers)
+	for i := 0; i < len(uResp.Peers); i += peerSize {
+		ipBytes := uResp.Peers[i : i+4]
+		port := binary.BigEndian.Uint16(uResp.Peers[i+4 : i+6])
+
+		ipStr := fmt.Sprintf("%d.%d.%d.%d", ipBytes[0], ipBytes[1], ipBytes[2], ipBytes[3])
 
 		peers = append(peers, Peer{
-			IP:   ip,
+			IP:   ipStr,
 			Port: port,
 		})
 	}
+
 	return &peers, nil
 }

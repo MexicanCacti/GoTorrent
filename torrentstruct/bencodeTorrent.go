@@ -39,6 +39,7 @@ type TorrentType struct {
 	PieceLength int64
 	InfoHash    [bytesPerChunk]byte
 	PieceHashes [][bytesPerChunk]byte
+	PeerID      [20]byte
 }
 
 func Bytes(b bencodeType) ([]byte, error) {

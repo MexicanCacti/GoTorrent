@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"sync"
 )
 
 const portNum int = 7777
@@ -27,11 +28,20 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	fmt.Println(torrent)
+
+	torrent.PeerID = [20]byte(peerID)
 
 	peerList, err := networking.GetPeers(&torrent, [20]byte(peerID), uint16(portNum))
+	if err != nil {
+		log.Fatal(err)
+	}
 
+	var wg sync.WaitGroup
 	for i, peer := range *peerList {
 		fmt.Printf("Peer [%v]: IP: %v, Port: %v\n", i, peer.IP, peer.Port)
+		wg.Add(1)
+		go networking.ConnectToPeer(peer, &torrent, &wg)
 	}
+
+	wg.Wait()
 }
