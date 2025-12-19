@@ -3,6 +3,7 @@ package main
 import (
 	"GoTorrent/networking"
 	"GoTorrent/torrentstruct"
+	"crypto/rand"
 	"fmt"
 	"log"
 	"os"
@@ -11,8 +12,24 @@ import (
 
 const portNum int = 7777
 
+func GeneratePeerID() ([20]byte, error) {
+	var peerID [20]byte
+
+	copy(peerID[0:8], []byte("-GT0001-"))
+
+	_, err := rand.Read(peerID[8:])
+	if err != nil {
+		return peerID, err
+	}
+
+	return peerID, nil
+}
+
 func main() {
-	var peerID = make([]byte, 20)
+	peerID, err := GeneratePeerID()
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	torrentPath, err := torrentstruct.PickTorrent()
 	if err != nil {
@@ -36,11 +53,12 @@ func main() {
 		log.Fatal(err)
 	}
 
+	workQueue, results := networking.ConstructWorkQueue(&torrent)
 	var wg sync.WaitGroup
 	for i, peer := range *peerList {
 		fmt.Printf("Peer [%v]: IP: %v, Port: %v\n", i, peer.IP, peer.Port)
 		wg.Add(1)
-		go networking.ConnectToPeer(peer, &torrent, &wg)
+		go networking.ConnectToPeer(peer, &torrent, &wg, workQueue, results)
 	}
 
 	wg.Wait()

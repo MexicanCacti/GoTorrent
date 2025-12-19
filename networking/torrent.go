@@ -1,94 +1,85 @@
 package networking
 
 import (
+	"GoTorrent/message"
 	"GoTorrent/torrentstruct"
-	"fmt"
-	"io"
 	"log"
-	"net"
 	"sync"
-	"time"
 )
 
-const ConnectionWaitFactor = 3
+const ConnectionWaitFactor = 10
 const ProtocolLength = 19
 const ProtocolIdentifier = "BitTorrent protocol"
 
-type Handshake struct {
-	Pstr     string
-	InfoHash [20]byte
-	PeerID   [20]byte
+const bytesPerChunk = 20
+
+type Work struct {
+	Index    int
+	WorkHash [bytesPerChunk]byte
+	Length   int
 }
 
-func (h *Handshake) serialize() []byte {
-	buf := make([]byte, len(h.Pstr)+49)
-	buf[0] = byte(len(h.Pstr))
-	curr := 1
-	curr += copy(buf[curr:], h.Pstr)
-	curr += copy(buf[curr:], make([]byte, 8)) // Reserved, flip to indicate ext supported
-	curr += copy(buf[curr:], h.InfoHash[:])
-	curr += copy(buf[curr:], h.PeerID[:])
-	return buf
+type WorkResults struct {
+	PieceIndex     int
+	PieceStartByte int
+	PieceLength    int
+	PieceHash      [bytesPerChunk]byte
 }
 
-func deserialize(buf []byte) *Handshake {
-	h := Handshake{}
-	PstrLen := int(buf[0])
-	curr := 1
-	h.Pstr = string(buf[curr : curr+PstrLen])
-	curr += PstrLen
-	//reserveBytes := buf[curr : curr+8]
-	curr += 8
-	copy(h.InfoHash[:], buf[curr:curr+20])
-	curr += 20
-	copy(h.PeerID[:], buf[curr:curr+20])
-	return &h
+func ConstructWorkQueue(torrent *torrentstruct.TorrentType) (chan *Work, chan *WorkResults) {
+	workQueue := make(chan *Work, len(torrent.PieceHashes))
+	results := make(chan *WorkResults)
+
+	for index, hash := range torrent.PieceHashes {
+		length := torrent.CalcPieceSize(index)
+		workQueue <- &Work{index, hash, length}
+	}
+
+	return workQueue, results
 }
 
-func ConnectToPeer(peer Peer, torrent *torrentstruct.TorrentType, wg *sync.WaitGroup) {
+func ConnectToPeer(peer Peer, torrent *torrentstruct.TorrentType, wg *sync.WaitGroup, workQueue chan *Work, results chan *WorkResults) {
 	defer wg.Done()
-	dialer := net.Dialer{
-		Timeout: ConnectionWaitFactor * time.Second,
-	}
-	peerAddress := peer.GetTCPAddress()
-	conn, err := dialer.Dial("tcp", peerAddress)
+
+	client, err := New(peer, torrent)
 	if err != nil {
-		log.Println(err)
+		log.Printf("could not create client: %v\n", err)
 		return
 	}
-	defer conn.Close()
 
-	handShake := Handshake{
-		ProtocolIdentifier,
-		torrent.InfoHash,
-		torrent.PeerID,
-	}
+	defer client.Conn.Close()
 
-	_, err = conn.Write(handShake.serialize())
+	//fmt.Printf("IP: %v | Port: %v | ID: %v\n", peer.IP, peer.Port, client.peerID)
+
+	err = message.SendInterested(client.Conn)
 	if err != nil {
-		log.Println("handshake write failed: ", err)
-		return
-	}
-	buf := make([]byte, len(ProtocolIdentifier)+49)
-
-	_, err = io.ReadFull(conn, buf)
-	if err != nil {
-		log.Println("handshake read failed: ", err)
-		return
-	}
-	handshakeResponse := deserialize(buf)
-
-	if handshakeResponse.Pstr != ProtocolIdentifier {
-		log.Println("invalid protocol identifier")
 		return
 	}
 
-	if handshakeResponse.InfoHash != torrent.InfoHash {
-		log.Printf("InfoHash not match")
-		return
+	for {
+		m, err := message.ReadMessage(client.Conn)
+		if err != nil {
+			log.Printf("could not read message: %v\n", err)
+			return
+		}
+
+		if m == nil {
+			continue // keep-alive
+		}
+
+		switch m.Name() {
+		case "Unchoke":
+			client.Choked = false
+			log.Printf("Unchoked\n")
+			// Now begin requesting
+			return
+
+		case "Choke":
+			client.Choked = true
+			log.Printf("Choked\n")
+			return
+
+		}
 	}
 
-	connectionID := handshakeResponse.PeerID
-
-	fmt.Printf("IP: %v | Port: %v | ID: %v\n", peer.IP, peer.Port, connectionID)
 }

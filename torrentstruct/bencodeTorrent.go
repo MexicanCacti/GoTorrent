@@ -40,6 +40,7 @@ type TorrentType struct {
 	InfoHash    [bytesPerChunk]byte
 	PieceHashes [][bytesPerChunk]byte
 	PeerID      [20]byte
+	NumPieces   int
 }
 
 func Bytes(b bencodeType) ([]byte, error) {
@@ -49,6 +50,14 @@ func Bytes(b bencodeType) ([]byte, error) {
 		return nil, err
 	}
 	return buf.Bytes(), nil
+}
+
+func (t TorrentType) CalcPieceSize(index int) int {
+	if index < 0 || index >= len(t.PieceHashes) {
+		return 0
+	}
+
+	return len(t.PieceHashes[index])
 }
 
 func (t TorrentType) String() string {
@@ -118,6 +127,7 @@ func convertToTorrent(bencode bencodeType, path string) (TorrentType, error) {
 		return torrent, nil
 	}
 	torrent.InfoHash = sha1.Sum(infoBytes)
+	torrent.NumPieces = pieceCount
 
 	return torrent, nil
 }
