@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"sync"
 )
 
@@ -46,20 +47,33 @@ func main() {
 		log.Fatal(err)
 	}
 
-	torrent.PeerID = [20]byte(peerID)
+	fileReader.Close()
 
+	folder, err := torrentstruct.PickDownloadPath()
+	if err != nil {
+		log.Fatal(err)
+	}
+	savePath := filepath.Join(folder, torrent.Name)
+
+	torrent.PeerID = [20]byte(peerID)
 	peerList, err := networking.GetPeers(&torrent, [20]byte(peerID), uint16(portNum))
 	if err != nil {
 		log.Fatal(err)
 	}
 
 	workQueue, results := networking.ConstructWorkQueue(&torrent)
+	fileWriter, err := os.Create(savePath)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer fileWriter.Close()
+	go networking.WritePieces(results, &torrent, fileWriter)
+
 	var wg sync.WaitGroup
 	for i, peer := range *peerList {
 		fmt.Printf("Peer [%v]: IP: %v, Port: %v\n", i, peer.IP, peer.Port)
 		wg.Add(1)
 		go networking.ConnectToPeer(peer, &torrent, &wg, workQueue, results)
 	}
-
 	wg.Wait()
 }

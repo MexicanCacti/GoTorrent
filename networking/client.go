@@ -29,6 +29,12 @@ func (bitfield Bitfield) setPiece(index int) {
 	bitfield[byteIndex] |= 1 << (7 - byteOffset)
 }
 
+func (bitfield Bitfield) clearPiece(index int) {
+	byteIndex := index / 8
+	byteOffset := index % 8
+	bitfield[byteIndex] &= ^(1 << (7 - byteOffset))
+}
+
 func (bitfield Bitfield) Pieces() []int {
 	var pieces []int
 
@@ -65,15 +71,10 @@ func New(peer Peer, torrent *torrentstruct.TorrentType) (*Client, error) {
 		return nil, errors.New("handshake failed: " + err.Error())
 	}
 
-	bitfieldMsg, err := message.ReadMessage(conn)
-	if err != nil {
-		return nil, errors.New("bitfield message failed: " + err.Error())
-	}
-
 	client := Client{
 		Conn:     conn,
 		Choked:   true,
-		Bitfield: Bitfield(bitfieldMsg.Payload),
+		Bitfield: make([]byte, 0),
 		peer:     peer,
 		infoHash: torrent.InfoHash,
 		peerID:   handshakeResponse.PeerID,
@@ -82,11 +83,18 @@ func New(peer Peer, torrent *torrentstruct.TorrentType) (*Client, error) {
 	return &client, nil
 }
 
-type PieceProgress struct {
-	Index      int
-	Client     *Client
-	Buf        []byte
-	downloaded int
-	requested  int
-	backlog    int
+func (client *Client) Read() (*message.Message, error) {
+	return message.ReadMessage(client.Conn)
+}
+
+func (client *Client) SendRequest(requestIndex int, requestBegin int, requestLength int) error {
+	req := message.CreateRequest(requestIndex, requestBegin, requestLength)
+	_, err := client.Conn.Write(req.Serialize())
+	return err
+}
+
+func (client *Client) SendHave(requestIndex int) error {
+	req := message.CreateHave(requestIndex)
+	_, err := client.Conn.Write(req.Serialize())
+	return err
 }

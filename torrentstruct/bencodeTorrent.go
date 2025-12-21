@@ -53,11 +53,16 @@ func Bytes(b bencodeType) ([]byte, error) {
 }
 
 func (t TorrentType) CalcPieceSize(index int) int {
-	if index < 0 || index >= len(t.PieceHashes) {
+	if index < 0 || index >= t.NumPieces {
 		return 0
 	}
 
-	return len(t.PieceHashes[index])
+	if index == t.NumPieces-1 {
+		remaining := int(t.Length - int64(index)*t.PieceLength)
+		return remaining
+	}
+
+	return int(t.PieceLength)
 }
 
 func (t TorrentType) String() string {
@@ -80,6 +85,14 @@ func PickTorrent() (string, error) {
 		Filter("Torrent File", "torrent").
 		Title("Select a .torrent file").
 		Load()
+	if err != nil {
+		return "", err
+	}
+	return path, nil
+}
+
+func PickDownloadPath() (string, error) {
+	path, err := dialog.Directory().Title("Select download location").Browse()
 	if err != nil {
 		return "", err
 	}

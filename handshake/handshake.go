@@ -54,6 +54,9 @@ func DoHandshake(conn net.Conn, protocolID string, torrent *torrentstruct.Torren
 	}
 
 	buf := make([]byte, len(protocolID)+49)
+	if len(buf) < 49 || len(buf) < 49+int(buf[0]) {
+		return nil, errors.New("handshake message too short!")
+	}
 
 	_, err = io.ReadFull(conn, buf)
 	if err != nil {
