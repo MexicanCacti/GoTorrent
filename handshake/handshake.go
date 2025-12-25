@@ -1,13 +1,11 @@
 package handshake
 
 import (
-	"GoTorrent/torrentstruct"
+	"GoTorrent/bencode"
 	"errors"
 	"io"
 	"net"
 )
-
-const handshakeWaitFactor = 10
 
 type Handshake struct {
 	Pstr     string
@@ -40,7 +38,7 @@ func deserializeHandshake(buf []byte) *Handshake {
 	return &h
 }
 
-func DoHandshake(conn net.Conn, protocolID string, torrent *torrentstruct.TorrentType) (*Handshake, error) {
+func DoHandshake(conn net.Conn, protocolID string, torrent *bencode.TorrentType) (*Handshake, error) {
 
 	handshake := Handshake{
 		protocolID,
@@ -50,12 +48,12 @@ func DoHandshake(conn net.Conn, protocolID string, torrent *torrentstruct.Torren
 
 	_, err := conn.Write(handshake.serialize())
 	if err != nil {
-		return nil, errors.New("handshake write failed: " + err.Error())
+		return nil, errors.New("handshake safeio failed: " + err.Error())
 	}
 
 	buf := make([]byte, len(protocolID)+49)
 	if len(buf) < 49 || len(buf) < 49+int(buf[0]) {
-		return nil, errors.New("handshake message too short!")
+		return nil, errors.New("handshake message too short")
 	}
 
 	_, err = io.ReadFull(conn, buf)

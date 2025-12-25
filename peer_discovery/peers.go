@@ -1,7 +1,8 @@
-package networking
+package peer_discovery
 
 import (
-	"GoTorrent/torrentstruct"
+	"GoTorrent/bencode"
+	"GoTorrent/safeio"
 	"bytes"
 	"encoding/binary"
 	"fmt"
@@ -14,10 +15,13 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/jackpal/bencode-go"
+	jackpal "github.com/jackpal/bencode-go"
 )
 
-// NOTE: Create NEW() function to init default values
+type Torrent = bencode.TorrentType
+type SafeWriter = safeio.SafeWriter
+type SafeReader = safeio.SafeReader
+
 type udpResponse struct {
 	Interval uint64 `bencode:"interval"`
 	Peers    []byte `bencode:"peers"`
@@ -43,7 +47,7 @@ func (p *Peer) GetTCPAddress() string {
 	)
 }
 
-func GetPeers(t *torrentstruct.TorrentType, peerID [20]byte, port uint16) (*[]Peer, error) {
+func GetPeers(t *Torrent, peerID [20]byte, port uint16) (*[]Peer, error) {
 	protocol, err := url.Parse(t.Announce)
 	if err != nil {
 		log.Println(err)
@@ -61,7 +65,7 @@ func GetPeers(t *torrentstruct.TorrentType, peerID [20]byte, port uint16) (*[]Pe
 	}
 }
 
-func buildHTTP(t *torrentstruct.TorrentType, peerID [20]byte, port uint16) (*[]Peer, error) {
+func buildHTTP(t *bencode.TorrentType, peerID [20]byte, port uint16) (*[]Peer, error) {
 	base, err := url.Parse(t.Announce)
 	if err != nil {
 		return nil, err
@@ -94,13 +98,13 @@ func httpQueryTracker(queryString string) (*[]Peer, error) {
 	}(resp.Body)
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		log.Println(err)
+		log.Println(fmt.Sprintf("http query tracker: %s", err))
 		return nil, err
 	}
 
 	httpResponse := httpResponse{}
 
-	err = bencode.Unmarshal(bytes.NewReader(respBody), &httpResponse)
+	err = jackpal.Unmarshal(bytes.NewReader(respBody), &httpResponse)
 	if err != nil {
 		log.Println(err)
 		return nil, err
@@ -113,7 +117,7 @@ func httpQueryTracker(queryString string) (*[]Peer, error) {
 See: https://xbtt.sourceforge.net/udp_tracker_protocol.html
 for formats of inputs/outputs
 */
-func buildUDP(t *torrentstruct.TorrentType, peerID [20]byte, port uint16) (*[]Peer, error) {
+func buildUDP(t *Torrent, peerID [20]byte, port uint16) (*[]Peer, error) {
 	// Dial tracker
 	u, err := url.Parse(t.Announce)
 	if err != nil {
@@ -126,17 +130,27 @@ func buildUDP(t *torrentstruct.TorrentType, peerID [20]byte, port uint16) (*[]Pe
 		log.Fatal(err)
 		return nil, err
 	}
-	defer conn.Close()
+	defer func(conn net.Conn) {
+		err := conn.Close()
+		if err != nil {
+			return
+		}
+	}(conn)
 	transactionID := rand.Uint32()
 
 	// Connect input
 	buf := new(bytes.Buffer)
-	protocolID := uint64(0x41727101980) //Note magic costant for udp tracker
+	protocolID := uint64(0x41727101980) //Note magic constant for udp tracker
 	action := uint32(0)
 
-	binary.Write(buf, binary.BigEndian, protocolID)
-	binary.Write(buf, binary.BigEndian, action)
-	binary.Write(buf, binary.BigEndian, transactionID)
+	safeWriter := safeio.NewSafeWriter(buf)
+	safeWriter.WriteBigEndian(protocolID)
+	safeWriter.WriteBigEndian(action)
+	safeWriter.WriteBigEndian(transactionID)
+
+	if safeWriter.GetError() != nil {
+		return nil, safeWriter.GetError()
+	}
 
 	_, err = conn.Write(buf.Bytes())
 	if err != nil {
@@ -165,9 +179,14 @@ func buildUDP(t *torrentstruct.TorrentType, peerID [20]byte, port uint16) (*[]Pe
 	var respTransactionID uint32
 	var respConnectionID uint64
 
-	binary.Read(respBuf, binary.BigEndian, &respAction)
-	binary.Read(respBuf, binary.BigEndian, &respTransactionID)
-	binary.Read(respBuf, binary.BigEndian, &respConnectionID)
+	safeReader := safeio.NewSafeReader(respBuf)
+	safeReader.ReadBigEndian(&respAction)
+	safeReader.ReadBigEndian(&respTransactionID)
+	safeReader.ReadBigEndian(&respConnectionID)
+
+	if safeReader.GetError() != nil {
+		return nil, safeReader.GetError()
+	}
 
 	if respAction != 0 {
 		return nil, fmt.Errorf("invalid response action %d", respAction)
@@ -180,19 +199,26 @@ func buildUDP(t *torrentstruct.TorrentType, peerID [20]byte, port uint16) (*[]Pe
 	// Announce input
 	buf = new(bytes.Buffer)
 
-	binary.Write(buf, binary.BigEndian, respConnectionID)
-	binary.Write(buf, binary.BigEndian, uint32(1)) // action
-	binary.Write(buf, binary.BigEndian, transactionID)
+	safeWriter = safeio.NewSafeWriter(buf)
+	safeWriter.WriteBigEndian(respConnectionID)
+	safeWriter.WriteBigEndian(uint32(1)) // action
+	safeWriter.WriteBigEndian(transactionID)
+
 	buf.Write(t.InfoHash[:])
 	buf.Write(peerID[:])
-	binary.Write(buf, binary.BigEndian, uint64(0))        // downloaded
-	binary.Write(buf, binary.BigEndian, uint64(t.Length)) // left
-	binary.Write(buf, binary.BigEndian, uint64(0))        // uploaded
-	binary.Write(buf, binary.BigEndian, uint32(0))        // event
-	binary.Write(buf, binary.BigEndian, uint32(0))        // IP address
-	binary.Write(buf, binary.BigEndian, rand.Uint32())    // key
-	binary.Write(buf, binary.BigEndian, int32(-1))        // num_want
-	binary.Write(buf, binary.BigEndian, port)
+
+	safeWriter.WriteBigEndian(uint64(0))        // downloaded
+	safeWriter.WriteBigEndian(uint64(t.Length)) // left
+	safeWriter.WriteBigEndian(uint64(0))        // uploaded
+	safeWriter.WriteBigEndian(uint32(0))        // event
+	safeWriter.WriteBigEndian(uint32(0))        // IP address
+	safeWriter.WriteBigEndian(rand.Uint32())    // key
+	safeWriter.WriteBigEndian(int32(-1))        // num_want
+	safeWriter.WriteBigEndian(port)
+
+	if safeWriter.GetError() != nil {
+		return nil, safeWriter.GetError()
+	}
 
 	_, err = conn.Write(buf.Bytes())
 

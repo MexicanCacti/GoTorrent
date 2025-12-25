@@ -1,107 +1,76 @@
 package networking
 
 import (
+	"GoTorrent/bencode"
+	client2 "GoTorrent/client"
 	"GoTorrent/message"
-	"GoTorrent/torrentstruct"
+	"GoTorrent/peer_discovery"
+	"GoTorrent/work"
 	"bytes"
 	"crypto/sha1"
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"sync"
 	"time"
 )
 
+type Work = work.Work
+type WorkResults = work.WorkResults
+type WorkProgress = work.WorkProgress
+
+/*
 const ConnectionWaitFactor = 10
 const ProtocolLength = 19
 const ProtocolIdentifier = "BitTorrent protocol"
+*/
 
-const bytesPerChunk = 20
 const requestSize = 16384 // 16kib block requests at a time
 const waitTimeFactor = 30
 const maxBacklog = 5
 const maxRetries = 5
 
-type Work struct {
-	Index      int
-	WorkHash   [bytesPerChunk]byte
-	Length     int
-	RetryCount int
-}
-
-type WorkResults struct {
-	PieceIndex int
-	buf        []byte
-}
-
-type WorkProgress struct {
-	index      int
-	client     *Client
-	buf        []byte
-	downloaded int
-	requested  int
-	backlog    int
-}
-
-func (workProgress *WorkProgress) readMessage() error {
-	msg, _ := workProgress.client.Read()
-	// Keep alive
-	if msg == nil {
-		return nil
-	}
-	switch msg.ID {
-	case message.MessageUnchoke:
-		workProgress.client.Choked = false
-	case message.MessageChoke:
-		workProgress.client.Choked = true
-	case message.MessageHave:
-		index, _ := message.ParseHave(msg)
-		workProgress.client.Bitfield.setPiece(index)
-	case message.MessagePiece:
-		dataAmount, _ := message.ParsePiece(workProgress.index, workProgress.buf, msg)
-		workProgress.downloaded += dataAmount
-		workProgress.backlog -= 1
-	case message.MessageBitfield:
-		workProgress.client.Bitfield, _ = message.ParseBitfield(msg)
-	}
-	return nil
-}
-
-func ConstructWorkQueue(torrent *torrentstruct.TorrentType) (chan *Work, chan *WorkResults) {
+func ConstructWorkQueue(torrent *bencode.TorrentType) (chan *Work, chan *WorkResults) {
 	workQueue := make(chan *Work, len(torrent.PieceHashes))
 	results := make(chan *WorkResults)
 
 	for index, hash := range torrent.PieceHashes {
 		length := torrent.CalcPieceSize(index)
-		workQueue <- &Work{index, hash, length, 0}
+		workQueue <- &Work{Index: index, WorkHash: hash, Length: length}
 	}
 
 	return workQueue, results
 }
 
-func WritePieces(results chan *WorkResults, torrent *torrentstruct.TorrentType, fileWriter *os.File) {
+func WritePieces(results chan *WorkResults, torrent *bencode.TorrentType, fileWriter *os.File) {
 	fileWriter.Truncate(torrent.Length)
 
 	piecesWritten := 0
 	for piecesWritten < torrent.NumPieces {
 		res := <-results
 		offset := int64(res.PieceIndex) * torrent.PieceLength
-		fileWriter.WriteAt(res.buf, offset)
+		fileWriter.WriteAt(res.Buf, offset)
 		piecesWritten += 1
 	}
 }
 
-func ConnectToPeer(peer Peer, torrent *torrentstruct.TorrentType, wg *sync.WaitGroup, workQueue chan *Work, results chan *WorkResults) {
+func ConnectToPeer(peer peer_discovery.Peer, torrent *bencode.TorrentType, wg *sync.WaitGroup, workQueue chan *Work, results chan *WorkResults) {
 	defer wg.Done()
 
-	client, err := New(peer, torrent)
+	client, err := client2.New(peer, torrent)
 	if err != nil {
 		log.Printf("could not create client: %v\n", err)
 		return
 	}
 
-	defer client.Conn.Close()
+	defer func(Conn net.Conn) {
+		err := Conn.Close()
+		if err != nil {
+
+		}
+	}(client.Conn)
 
 	//fmt.Printf("IP: %v | Port: %v | ID: %v\n", peer.IP, peer.Port, client.peerID)
 
@@ -136,86 +105,93 @@ func ConnectToPeer(peer Peer, torrent *torrentstruct.TorrentType, wg *sync.WaitG
 		case "Bitfield":
 			client.Bitfield, _ = message.ParseBitfield(m)
 			log.Printf("Bitfield\n")
+
+		default:
+			log.Printf("Unexpected message type: %v\n", m.Name())
 		}
 	}
 
 }
 
-func startRequesting(client *Client, workQueue chan *Work, results chan *WorkResults) {
-	for work := range workQueue {
-		if !client.Bitfield.hasPiece(work.Index) {
-			work.RetryCount++
-			workQueue <- work
+func startRequesting(client *client2.Client, workQueue chan *Work, results chan *WorkResults) {
+	for assignedWork := range workQueue {
+		if assignedWork.RetryCount > maxRetries {
+			log.Printf(fmt.Sprintf("client: [%v]: used allocated retrys", client.Peer.IP))
+		}
+
+		if !client.Bitfield.HasPiece(assignedWork.Index) {
+			assignedWork.RetryCount++
+			workQueue <- assignedWork
 			continue
 		}
 
-		buf, err := attemptPieceDownload(client, work)
+		buf, err := attemptPieceDownload(client, assignedWork)
 		// Failed to download, client lied, set bitmap to 0, place work back in channel
 		if err != nil {
-			work.RetryCount++
-			workQueue <- work
-			client.Bitfield.clearPiece(work.Index)
-			if work.RetryCount > maxRetries {
+			assignedWork.RetryCount++
+			workQueue <- assignedWork
+			client.Bitfield.ClearPiece(assignedWork.Index)
+			if assignedWork.RetryCount > maxRetries {
 				return
 			}
 			continue
 		}
 
 		// Verify
-		err = compareHash(work, buf)
+		err = compareHash(assignedWork, buf)
 		if err != nil {
 			log.Printf(err.Error())
-			workQueue <- work
-			client.Bitfield.clearPiece(work.Index)
-			if work.RetryCount > maxRetries {
+			workQueue <- assignedWork
+			client.Bitfield.ClearPiece(assignedWork.Index)
+			if assignedWork.RetryCount > maxRetries {
 				return
 			}
 			continue
 		}
-		log.Printf("finished downloading piece %d\n", work.Index)
-		client.SendHave(work.Index)
-		results <- &WorkResults{work.Index, buf}
+		_ = client.SendHave(assignedWork.Index)
+		results <- &WorkResults{PieceIndex: assignedWork.Index, Buf: buf}
 	}
 }
 
-func attemptPieceDownload(client *Client, work *Work) ([]byte, error) {
+func attemptPieceDownload(client *client2.Client, work *Work) ([]byte, error) {
 	workProgress := WorkProgress{
-		index:      work.Index,
-		client:     client,
-		buf:        make([]byte, work.Length),
-		downloaded: 0,
-		requested:  0,
-		backlog:    0,
+		Index:      work.Index,
+		Client:     client,
+		Buf:        make([]byte, work.Length),
+		Downloaded: 0,
+		Requested:  0,
+		Backlog:    0,
 	}
 
-	for workProgress.downloaded < work.Length {
-		client.Conn.SetDeadline(time.Now().Add(waitTimeFactor * time.Second))
+	for workProgress.Downloaded < work.Length {
+
 		// If we don't get it in 30 seconds assume we are not getting a response
-		defer client.Conn.SetDeadline(time.Time{})
-		if !workProgress.client.Choked {
-			for workProgress.backlog < maxBacklog && workProgress.requested < work.Length {
+		if !workProgress.Client.Choked {
+			for workProgress.Backlog < maxBacklog && workProgress.Requested < work.Length {
 				currentRequestSize := requestSize
-				if work.Length-workProgress.requested < currentRequestSize {
-					currentRequestSize = work.Length - workProgress.requested
+				if work.Length-workProgress.Requested < currentRequestSize {
+					currentRequestSize = work.Length - workProgress.Requested
 				}
-				err := client.SendRequest(work.Index, workProgress.requested, currentRequestSize)
+				err := client.SendRequest(work.Index, workProgress.Requested, currentRequestSize)
 				if err != nil {
 					return nil, err
 				}
-				workProgress.requested += currentRequestSize
-				workProgress.backlog += 1
+				workProgress.Requested += currentRequestSize
+				workProgress.Backlog += 1
 			}
 		}
-		err := workProgress.readMessage()
+		client.Conn.SetReadDeadline(time.Now().Add(waitTimeFactor * time.Second))
+		err := workProgress.ReadMessage()
+		client.Conn.SetReadDeadline(time.Time{})
 		if err != nil {
 			return nil, err
 		}
 	}
 
-	if workProgress.downloaded != work.Length {
-		return nil, fmt.Errorf("incomplete piece: %d/%d", workProgress.downloaded, work.Length)
+	if workProgress.Downloaded != work.Length {
+		return nil, fmt.Errorf("incomplete piece: %d/%d", workProgress.Downloaded, work.Length)
 	}
-	return workProgress.buf, nil
+	return workProgress.Buf, nil
 
 }
 

@@ -1,9 +1,10 @@
-package networking
+package client
 
 import (
+	"GoTorrent/bencode"
 	"GoTorrent/handshake"
 	"GoTorrent/message"
-	"GoTorrent/torrentstruct"
+	"GoTorrent/peer_discovery"
 	"errors"
 	"net"
 	"time"
@@ -17,19 +18,19 @@ type Bitfield []byte // 0 indexed... 0b110, piece 2 is missing, 0b011, piece 0 i
 // Spare: 8 * Size - numPieces
 // Client MAY send bitfield, MUST be first msg after handshake
 
-func (bitfield Bitfield) hasPiece(index int) bool {
+func (bitfield Bitfield) HasPiece(index int) bool {
 	byteIndex := index / 8
 	byteOffset := index % 8
 	return bitfield[byteIndex]>>(7-byteOffset)&1 != 0
 }
 
-func (bitfield Bitfield) setPiece(index int) {
+func (bitfield Bitfield) SetPiece(index int) {
 	byteIndex := index / 8
 	byteOffset := index % 8
 	bitfield[byteIndex] |= 1 << (7 - byteOffset)
 }
 
-func (bitfield Bitfield) clearPiece(index int) {
+func (bitfield Bitfield) ClearPiece(index int) {
 	byteIndex := index / 8
 	byteOffset := index % 8
 	bitfield[byteIndex] &= ^(1 << (7 - byteOffset))
@@ -39,7 +40,7 @@ func (bitfield Bitfield) Pieces() []int {
 	var pieces []int
 
 	for i := 0; i < len(bitfield)*8; i++ {
-		if bitfield.hasPiece(i) {
+		if bitfield.HasPiece(i) {
 			pieces = append(pieces, i)
 		}
 	}
@@ -51,12 +52,12 @@ type Client struct {
 	Conn     net.Conn
 	Choked   bool
 	Bitfield Bitfield
-	peer     Peer
+	Peer     peer_discovery.Peer
 	infoHash [20]byte
 	peerID   [20]byte
 }
 
-func New(peer Peer, torrent *torrentstruct.TorrentType) (*Client, error) {
+func New(peer peer_discovery.Peer, torrent *bencode.TorrentType) (*Client, error) {
 	dialer := net.Dialer{
 		Timeout: connectionWaitFactor * time.Second,
 	}
@@ -75,7 +76,7 @@ func New(peer Peer, torrent *torrentstruct.TorrentType) (*Client, error) {
 		Conn:     conn,
 		Choked:   true,
 		Bitfield: make([]byte, 0),
-		peer:     peer,
+		Peer:     peer,
 		infoHash: torrent.InfoHash,
 		peerID:   handshakeResponse.PeerID,
 	}

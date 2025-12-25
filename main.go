@@ -1,8 +1,9 @@
 package main
 
 import (
+	"GoTorrent/bencode"
 	"GoTorrent/networking"
-	"GoTorrent/torrentstruct"
+	"GoTorrent/peer_discovery"
 	"crypto/rand"
 	"fmt"
 	"log"
@@ -32,7 +33,7 @@ func main() {
 		log.Fatal(err)
 	}
 
-	torrentPath, err := torrentstruct.PickTorrent()
+	torrentPath, err := bencode.PickTorrent()
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -42,21 +43,21 @@ func main() {
 		log.Fatal(err)
 	}
 
-	torrent, err := torrentstruct.ParseTorrent(fileReader, torrentPath)
+	torrent, err := bencode.ParseTorrent(fileReader, torrentPath)
 	if err != nil {
 		log.Fatal(err)
 	}
 
 	fileReader.Close()
 
-	folder, err := torrentstruct.PickDownloadPath()
+	folder, err := bencode.PickDownloadPath()
 	if err != nil {
 		log.Fatal(err)
 	}
 	savePath := filepath.Join(folder, torrent.Name)
 
 	torrent.PeerID = [20]byte(peerID)
-	peerList, err := networking.GetPeers(&torrent, [20]byte(peerID), uint16(portNum))
+	peerList, err := peer_discovery.GetPeers(&torrent, [20]byte(peerID), uint16(portNum))
 	if err != nil {
 		log.Fatal(err)
 	}

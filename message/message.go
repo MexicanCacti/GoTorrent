@@ -11,15 +11,15 @@ import (
 type messageID uint8
 
 const (
-	MessageChoke         messageID = 0
-	MessageUnchoke       messageID = 1
-	MessageInterested    messageID = 2
-	MessageNotInterested messageID = 3
-	MessageHave          messageID = 4
-	MessageBitfield      messageID = 5
-	MessageRequest       messageID = 6
-	MessagePiece         messageID = 7
-	MessageCancel        messageID = 8
+	MsgChoke         messageID = 0
+	MsgUnchoke       messageID = 1
+	MsgInterested    messageID = 2
+	MsgNotInterested messageID = 3
+	MsgHave          messageID = 4
+	MsgBitfield      messageID = 5
+	MsgRequest       messageID = 6
+	MsgPiece         messageID = 7
+	MsgCancel        messageID = 8
 )
 
 type Message struct {
@@ -56,7 +56,7 @@ func DeserializeMessage(buf []byte) *Message {
 
 func SendInterested(conn net.Conn) error {
 	message := Message{
-		ID:      MessageInterested,
+		ID:      MsgInterested,
 		Payload: make([]byte, 0),
 	}
 	_, err := conn.Write(message.Serialize())
@@ -91,31 +91,31 @@ func (m *Message) Name() string {
 	}
 
 	switch m.ID {
-	case MessageChoke:
+	case MsgChoke:
 		return "Choke"
-	case MessageUnchoke:
+	case MsgUnchoke:
 		return "Unchoke"
-	case MessageInterested:
+	case MsgInterested:
 		return "Interested"
-	case MessageNotInterested:
+	case MsgNotInterested:
 		return "NotInterested"
-	case MessageHave:
+	case MsgHave:
 		return "Have"
-	case MessageBitfield:
+	case MsgBitfield:
 		return "Bitfield"
-	case MessageRequest:
+	case MsgRequest:
 		return "Request"
-	case MessagePiece:
+	case MsgPiece:
 		return "Piece"
-	case MessageCancel:
+	case MsgCancel:
 		return "Cancel"
 	}
 	return fmt.Sprintf("Unknown Message ID: %d", m.ID)
 }
 
 func ParseHave(m *Message) (int, error) {
-	if m.ID != MessageHave {
-		return 0, errors.New(fmt.Sprintf("expected message ID: %d, got: %d", MessageHave, m.ID))
+	if m.ID != MsgHave {
+		return 0, errors.New(fmt.Sprintf("expected message ID: %d, got: %d", MsgHave, m.ID))
 	}
 	if len(m.Payload) != 4 {
 		return 0, errors.New(fmt.Sprintf("expected payload length: %d, got: %d", 4, len(m.Payload)))
@@ -125,8 +125,8 @@ func ParseHave(m *Message) (int, error) {
 }
 
 func ParsePiece(index int, buf []byte, m *Message) (int, error) {
-	if m.ID != MessagePiece {
-		return 0, errors.New(fmt.Sprintf("expected message ID: %d, got: %d", MessagePiece, m.ID))
+	if m.ID != MsgPiece {
+		return 0, errors.New(fmt.Sprintf("expected message ID: %d, got: %d", MsgPiece, m.ID))
 	}
 	if len(m.Payload) < 8 {
 		return 0, errors.New(fmt.Sprintf("too short payload length: %d", len(m.Payload)))
@@ -148,8 +148,8 @@ func ParsePiece(index int, buf []byte, m *Message) (int, error) {
 }
 
 func ParseBitfield(m *Message) ([]byte, error) {
-	if m.ID != MessageBitfield {
-		return nil, errors.New(fmt.Sprintf("expected message ID: %d, got: %d", MessageBitfield, m.ID))
+	if m.ID != MsgBitfield {
+		return nil, errors.New(fmt.Sprintf("expected message ID: %d, got: %d", MsgBitfield, m.ID))
 	}
 
 	bitfieldLength := len(m.Payload)
@@ -164,7 +164,7 @@ func CreateRequest(requestIndex int, requestBegin int, requestLength int) *Messa
 	binary.BigEndian.PutUint32(payload[4:8], uint32(requestBegin))
 	binary.BigEndian.PutUint32(payload[8:12], uint32(requestLength))
 	return &Message{
-		ID:      MessageRequest,
+		ID:      MsgRequest,
 		Payload: payload,
 	}
 }
@@ -173,7 +173,7 @@ func CreateHave(requestIndex int) *Message {
 	payload := make([]byte, 4)
 	binary.BigEndian.PutUint32(payload[0:4], uint32(requestIndex))
 	return &Message{
-		ID:      MessageHave,
+		ID:      MsgHave,
 		Payload: payload,
 	}
 }
