@@ -66,8 +66,10 @@ func New(peer peer_discovery.Peer, torrent *bencode.TorrentType) (*Client, error
 	if err != nil {
 		return nil, err
 	}
-
+	handshakeTimeout := 30 * time.Second
+	conn.SetDeadline(time.Now().Add(handshakeTimeout))
 	handshakeResponse, err := handshake.DoHandshake(conn, protocolIdentifier, torrent)
+	conn.SetDeadline(time.Time{})
 	if err != nil {
 		return nil, errors.New("handshake failed: " + err.Error())
 	}
@@ -90,12 +92,16 @@ func (client *Client) Read() (*message.Message, error) {
 
 func (client *Client) SendRequest(requestIndex int, requestBegin int, requestLength int) error {
 	req := message.CreateRequest(requestIndex, requestBegin, requestLength)
+	client.Conn.SetWriteDeadline(time.Now().Add(connectionWaitFactor * time.Second * 10))
 	_, err := client.Conn.Write(req.Serialize())
+	client.Conn.SetWriteDeadline(time.Time{})
 	return err
 }
 
 func (client *Client) SendHave(requestIndex int) error {
 	req := message.CreateHave(requestIndex)
+	client.Conn.SetWriteDeadline(time.Now().Add(connectionWaitFactor * time.Second * 10))
 	_, err := client.Conn.Write(req.Serialize())
+	client.Conn.SetWriteDeadline(time.Time{})
 	return err
 }

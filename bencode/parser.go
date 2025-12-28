@@ -3,8 +3,10 @@ package bencode
 import (
 	"bytes"
 	"crypto/sha1"
+	"fmt"
 	"io"
 	"log"
+	"path/filepath"
 
 	"github.com/jackpal/bencode-go"
 )
@@ -50,21 +52,37 @@ func convertToTorrent(bencode BencodeType, path string) (TorrentType, error) {
 
 	torrent := TorrentType{}
 	torrent.Path = path
-
 	torrent.Announce = bencode.Announce
 	torrent.Name = bencode.Info.Name
 	torrent.PieceLength = bencode.Info.PieceLength
 
-	if bencode.Info.Length > 0 {
-		torrent.Length = bencode.Info.Length
-	} else if len(bencode.Info.Files) > 0 {
-		var totalLength int64
-		for _, file := range bencode.Info.Files {
-			totalLength += file.Length
+	// Single-file torrent
+	if len(bencode.Info.Files) == 0 {
+		torrent.Files = []TorrentFile{
+			{
+				Path:   bencode.Info.Name,   // file name
+				Length: bencode.Info.Length, // file length
+				Offset: 0,
+			},
 		}
-		torrent.Length = totalLength
+		torrent.Length = bencode.Info.Length
+	} else {
+		var offset int64
+		for _, file := range bencode.Info.Files {
+			fp := filepath.Join(file.Path...)
+			torrent.Files = append(torrent.Files, TorrentFile{
+				Path:   fp,
+				Length: file.Length,
+				Offset: offset,
+			})
+			offset += file.Length
+		}
+		torrent.Length = offset
 	}
 
+	if len(bencode.Info.Pieces)%bytesPerChunk != 0 {
+		return torrent, fmt.Errorf("invalid pieces length")
+	}
 	pieceCount := len(bencode.Info.Pieces) / bytesPerChunk
 	torrent.PieceHashes = make([][bytesPerChunk]byte, pieceCount)
 	for i := 0; i < pieceCount; i++ {

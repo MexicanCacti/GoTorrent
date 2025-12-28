@@ -13,6 +13,7 @@ import (
 )
 
 const portNum int = 7777
+const numWriters int = 3
 
 func GeneratePeerID() ([20]byte, error) {
 	var peerID [20]byte
@@ -56,25 +57,44 @@ func main() {
 	}
 	savePath := filepath.Join(folder, torrent.Name)
 
-	torrent.PeerID = [20]byte(peerID)
-	peerList, err := peer_discovery.GetPeers(&torrent, [20]byte(peerID), uint16(portNum))
+	torrent.PeerID = peerID
+	peerList, err := peer_discovery.GetPeers(&torrent, peerID, uint16(portNum))
 	if err != nil {
 		log.Fatal(err)
 	}
 
 	workQueue, results := networking.ConstructWorkQueue(&torrent)
-	fileWriter, err := os.Create(savePath)
+	openFiles, err := bencode.OpenFiles(&torrent, savePath)
+
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer fileWriter.Close()
-	go networking.WritePieces(results, &torrent, fileWriter)
 
-	var wg sync.WaitGroup
+	var writeGroup sync.WaitGroup
+	var writtenPieces int64 = 0
+	var totalPieces = int64(torrent.NumPieces)
+	for i := 0; i < numWriters; i++ {
+		writeGroup.Add(1)
+		go networking.WritePieces(results, &torrent, openFiles, &writeGroup, &writtenPieces, &totalPieces)
+	}
+
+	var downloadedPieces int64 = 0
+	log.Printf("Total Pieces: %d\n", totalPieces)
+
+	var torrentGroup sync.WaitGroup
 	for i, peer := range *peerList {
 		fmt.Printf("Peer [%v]: IP: %v, Port: %v\n", i, peer.IP, peer.Port)
-		wg.Add(1)
-		go networking.ConnectToPeer(peer, &torrent, &wg, workQueue, results)
+		torrentGroup.Add(1)
+		go networking.ConnectToPeer(peer, &torrent, &torrentGroup, workQueue, results, &downloadedPieces, &totalPieces)
 	}
-	wg.Wait()
+	torrentGroup.Wait()
+	log.Println("TORRENT GROUP DONE")
+	close(workQueue)
+	writeGroup.Wait()
+	log.Println("WRITE GROUP DONE")
+	close(results)
+
+	for _, file := range openFiles {
+		file.Close()
+	}
 }

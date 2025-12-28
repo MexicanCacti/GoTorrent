@@ -2,6 +2,9 @@ package bencode
 
 import (
 	"fmt"
+	"log"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/sqweek/dialog"
@@ -9,6 +12,11 @@ import (
 
 const bytesPerChunk = 20
 
+type TorrentFile struct {
+	Path   string
+	Length int64
+	Offset int64
+}
 type TorrentType struct {
 	Path        string
 	Announce    string
@@ -19,6 +27,8 @@ type TorrentType struct {
 	PieceHashes [][bytesPerChunk]byte
 	PeerID      [20]byte
 	NumPieces   int
+
+	Files []TorrentFile
 }
 
 func (t TorrentType) CalcPieceSize(index int) int {
@@ -66,4 +76,29 @@ func PickDownloadPath() (string, error) {
 		return "", err
 	}
 	return path, nil
+}
+
+func OpenFiles(t *TorrentType, savePath string) ([]*os.File, error) {
+	openFiles := make([]*os.File, len(t.Files))
+	for i, f := range t.Files {
+		fullPath := filepath.Join(savePath, f.Path)
+		err := os.MkdirAll(filepath.Dir(fullPath), 0755) // perm 0755: allow dir creation, 0644: file, 0777: all
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		file, err := os.OpenFile(fullPath, os.O_CREATE|os.O_WRONLY, 0644)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		err = file.Truncate(f.Length)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		openFiles[i] = file
+	}
+
+	return openFiles, nil
 }

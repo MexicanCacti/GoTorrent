@@ -6,7 +6,10 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"time"
 )
+
+const readWaitTimeFactor = 30
 
 type messageID uint8
 
@@ -65,7 +68,9 @@ func SendInterested(conn net.Conn) error {
 
 func ReadMessage(conn net.Conn) (*Message, error) {
 	lengthBuffer := make([]byte, 4)
+	conn.SetReadDeadline(time.Now().Add(readWaitTimeFactor * time.Second))
 	_, err := io.ReadFull(conn, lengthBuffer)
+	conn.SetReadDeadline(time.Time{})
 	if err != nil {
 		return nil, err
 	}

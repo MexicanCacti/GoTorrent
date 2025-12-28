@@ -14,12 +14,12 @@ type Work struct {
 	RetryCount int
 }
 
-type WorkResults struct {
+type Results struct {
 	PieceIndex int
 	Buf        []byte
 }
 
-type WorkProgress struct {
+type Progress struct {
 	Index      int
 	Client     *client.Client
 	Buf        []byte
@@ -28,7 +28,7 @@ type WorkProgress struct {
 	Backlog    int
 }
 
-func (workProgress *WorkProgress) ReadMessage() error {
+func (workProgress *Progress) ReadMessage() error {
 	msg, _ := workProgress.Client.Read()
 	// Keep alive
 	if msg == nil {
