@@ -3,9 +3,13 @@ package handshake
 import (
 	"GoTorrent/bencode"
 	"errors"
+	"fmt"
 	"io"
 	"net"
+	"time"
 )
+
+const handshakeWaitFactor = 5
 
 type Handshake struct {
 	Pstr     string
@@ -24,18 +28,33 @@ func (h *Handshake) serialize() []byte {
 	return buf
 }
 
-func deserializeHandshake(buf []byte) *Handshake {
+func deserializeHandshake(conn net.Conn) (*Handshake, error) {
+	lengthBuf := make([]byte, 1)
+	conn.SetReadDeadline(time.Now().Add(handshakeWaitFactor * time.Second))
+	_, err := io.ReadFull(conn, lengthBuf)
+	defer conn.SetReadDeadline(time.Time{})
+	if err != nil {
+		return nil, err
+	}
+	pStrLen := int(lengthBuf[0])
+
+	if pStrLen == 0 {
+		return nil, fmt.Errorf("ptrstrlen was 0")
+	}
+
+	handshakeBuf := make([]byte, pStrLen+48)
+	conn.SetReadDeadline(time.Now().Add(handshakeWaitFactor * time.Second))
+	defer conn.SetReadDeadline(time.Time{})
+	_, err = io.ReadFull(conn, handshakeBuf)
+	if err != nil {
+		return nil, err
+	}
+
 	h := Handshake{}
-	PstrLen := int(buf[0])
-	curr := 1
-	h.Pstr = string(buf[curr : curr+PstrLen])
-	curr += PstrLen
-	//reserveBytes := buf[curr : curr+8]
-	curr += 8
-	copy(h.InfoHash[:], buf[curr:curr+20])
-	curr += 20
-	copy(h.PeerID[:], buf[curr:curr+20])
-	return &h
+	h.Pstr = string(handshakeBuf[0:pStrLen])
+	copy(h.InfoHash[:], handshakeBuf[pStrLen+8:pStrLen+20+8])
+	copy(h.PeerID[:], handshakeBuf[pStrLen+8+20:])
+	return &h, nil
 }
 
 func DoHandshake(conn net.Conn, protocolID string, torrent *bencode.TorrentType) (*Handshake, error) {
@@ -46,22 +65,17 @@ func DoHandshake(conn net.Conn, protocolID string, torrent *bencode.TorrentType)
 		torrent.PeerID,
 	}
 
+	conn.SetWriteDeadline(time.Now().Add(handshakeWaitFactor * time.Second))
+	defer conn.SetWriteDeadline(time.Time{})
 	_, err := conn.Write(handshake.serialize())
 	if err != nil {
-		return nil, errors.New("handshake safeio failed: " + err.Error())
+		return nil, errors.New("handshake write failed: " + err.Error())
 	}
 
-	buf := make([]byte, len(protocolID)+49)
-	if len(buf) < 49 || len(buf) < 49+int(buf[0]) {
-		return nil, errors.New("handshake message too short")
-	}
-
-	_, err = io.ReadFull(conn, buf)
+	handshakeResponse, err := deserializeHandshake(conn)
 	if err != nil {
-		return nil, errors.New("handshake read failed: " + err.Error())
+		return nil, errors.New("handshake deserialize failed: " + err.Error())
 	}
-
-	handshakeResponse := deserializeHandshake(buf)
 
 	if handshakeResponse.Pstr != protocolID {
 		return nil, errors.New("invalid protocol identifier")

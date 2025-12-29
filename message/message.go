@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"time"
 )
 
 const readWaitTimeFactor = 30
@@ -66,11 +65,9 @@ func SendInterested(conn net.Conn) error {
 	return err
 }
 
-func ReadMessage(conn net.Conn) (*Message, error) {
+func ReadMessage(conn io.Reader) (*Message, error) {
 	lengthBuffer := make([]byte, 4)
-	conn.SetReadDeadline(time.Now().Add(readWaitTimeFactor * time.Second))
 	_, err := io.ReadFull(conn, lengthBuffer)
-	conn.SetReadDeadline(time.Time{})
 	if err != nil {
 		return nil, err
 	}
@@ -181,4 +178,9 @@ func CreateHave(requestIndex int) *Message {
 		ID:      MsgHave,
 		Payload: payload,
 	}
+}
+
+func CreateUnchoke() *Message {
+	msg := Message{ID: MsgUnchoke, Payload: nil}
+	return &msg
 }

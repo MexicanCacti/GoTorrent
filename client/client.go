@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-const connectionWaitFactor = 3
+const connectionWaitFactor = 5
 const protocolIdentifier = "BitTorrent protocol"
 
 type Bitfield []byte // 0 indexed... 0b110, piece 2 is missing, 0b011, piece 0 is missing, big endian
@@ -18,22 +18,38 @@ type Bitfield []byte // 0 indexed... 0b110, piece 2 is missing, 0b011, piece 0 i
 // Spare: 8 * Size - numPieces
 // Client MAY send bitfield, MUST be first msg after handshake
 
-func (bitfield Bitfield) HasPiece(index int) bool {
+func (bitfield *Bitfield) HasPiece(index int) bool {
+	if index < 0 {
+		return false
+	}
 	byteIndex := index / 8
 	byteOffset := index % 8
-	return bitfield[byteIndex]>>(7-byteOffset)&1 != 0
+	if len(*bitfield) <= byteIndex {
+		return false
+	}
+	return (*bitfield)[byteIndex]>>(7-byteOffset)&1 != 0
 }
 
-func (bitfield Bitfield) SetPiece(index int) {
+func (bitfield *Bitfield) SetPiece(index int) {
+	if index < 0 {
+		return
+	}
 	byteIndex := index / 8
 	byteOffset := index % 8
-	bitfield[byteIndex] |= 1 << (7 - byteOffset)
+	if byteIndex >= len(*bitfield) {
+		newLen := byteIndex + 1
+		newBitfield := make(Bitfield, newLen)
+		copy(newBitfield, *bitfield)
+		*bitfield = newBitfield
+	}
+
+	(*bitfield)[byteIndex] |= 1 << (7 - byteOffset)
 }
 
-func (bitfield Bitfield) ClearPiece(index int) {
+func (bitfield *Bitfield) ClearPiece(index int) {
 	byteIndex := index / 8
 	byteOffset := index % 8
-	bitfield[byteIndex] &= ^(1 << (7 - byteOffset))
+	(*bitfield)[byteIndex] &= ^(1 << (7 - byteOffset))
 }
 
 func (bitfield Bitfield) Pieces() []int {
@@ -48,6 +64,24 @@ func (bitfield Bitfield) Pieces() []int {
 	return pieces
 }
 
+func getBitfield(conn net.Conn) (Bitfield, error) {
+	conn.SetDeadline(time.Now().Add(5 * time.Second))
+	defer conn.SetDeadline(time.Time{})
+
+	msg, err := message.ReadMessage(conn)
+	if err != nil {
+		return nil, err
+	}
+	if msg == nil {
+		return nil, errors.New("message is nil but should be bitfield")
+	}
+	if msg.ID != message.MsgBitfield {
+		return nil, errors.New("invalid message id received")
+	}
+
+	return msg.Payload, nil
+}
+
 type Client struct {
 	Conn     net.Conn
 	Choked   bool
@@ -58,26 +92,27 @@ type Client struct {
 }
 
 func New(peer peer_discovery.Peer, torrent *bencode.TorrentType) (*Client, error) {
-	dialer := net.Dialer{
-		Timeout: connectionWaitFactor * time.Second,
-	}
-	peerAddress := peer.GetTCPAddress()
-	conn, err := dialer.Dial("tcp", peerAddress)
+	conn, err := net.Dial("tcp", peer.GetTCPAddress())
 	if err != nil {
 		return nil, err
 	}
-	handshakeTimeout := 30 * time.Second
-	conn.SetDeadline(time.Now().Add(handshakeTimeout))
+
 	handshakeResponse, err := handshake.DoHandshake(conn, protocolIdentifier, torrent)
-	conn.SetDeadline(time.Time{})
 	if err != nil {
+		conn.Close()
 		return nil, errors.New("handshake failed: " + err.Error())
+	}
+
+	bitfield, err := getBitfield(conn)
+	if err != nil {
+		conn.Close()
+		return nil, err
 	}
 
 	client := Client{
 		Conn:     conn,
 		Choked:   true,
-		Bitfield: make([]byte, 0),
+		Bitfield: bitfield,
 		Peer:     peer,
 		infoHash: torrent.InfoHash,
 		peerID:   handshakeResponse.PeerID,
@@ -92,16 +127,18 @@ func (client *Client) Read() (*message.Message, error) {
 
 func (client *Client) SendRequest(requestIndex int, requestBegin int, requestLength int) error {
 	req := message.CreateRequest(requestIndex, requestBegin, requestLength)
-	client.Conn.SetWriteDeadline(time.Now().Add(connectionWaitFactor * time.Second * 10))
 	_, err := client.Conn.Write(req.Serialize())
-	client.Conn.SetWriteDeadline(time.Time{})
 	return err
 }
 
 func (client *Client) SendHave(requestIndex int) error {
 	req := message.CreateHave(requestIndex)
-	client.Conn.SetWriteDeadline(time.Now().Add(connectionWaitFactor * time.Second * 10))
 	_, err := client.Conn.Write(req.Serialize())
-	client.Conn.SetWriteDeadline(time.Time{})
+	return err
+}
+
+func (client *Client) SendUnchoke() error {
+	msg := message.CreateUnchoke()
+	_, err := client.Conn.Write(msg.Serialize())
 	return err
 }

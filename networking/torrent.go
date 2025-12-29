@@ -29,11 +29,9 @@ const ProtocolIdentifier = "BitTorrent protocol"
 
 const requestSize = 16384 // 16kib block requests at a time
 const maxBacklog = 5
-const maxRetries = 100
-const clientCreationRetries = 3
+const clientCreationRetries = 1
 const clientCreationTimeout = 5
-const interestedRetries = 3
-const interestedTimeout = 5
+const downloadTimeoutFactor = 30
 const workRetrievalTimeout = 100
 
 func ConstructWorkQueue(torrent *bencode.TorrentType) (chan *Work, chan *WorkResults) {
@@ -76,8 +74,10 @@ func WritePieces(results chan *WorkResults, torrent *bencode.TorrentType, openFi
 					results <- res
 					continue
 				}
-				log.Printf(fmt.Sprintf("Wrote piece %d to file %d", res.PieceIndex, i))
-				atomic.AddInt64(writtenPieces, 1)
+				piecesWritten := atomic.AddInt64(writtenPieces, 1)
+				percent := (float64(piecesWritten) / float64(torrent.NumPieces)) * 100
+				log.Printf("[%0.2f%%]: Wrote piece [%d]", percent, res.PieceIndex)
+
 			}
 		case <-time.After(workRetrievalTimeout * time.Second * 5):
 			log.Printf("write retrieval timeout")
@@ -109,97 +109,45 @@ func ConnectToPeer(peer peer_discovery.Peer, torrent *bencode.TorrentType, wg *s
 
 	//fmt.Printf("IP: %v | Port: %v | ID: %v\n", peer.IP, peer.Port, client.peerID)
 
-	for i := 0; i < interestedRetries; i++ {
-		err = message.SendInterested(client.Conn)
-		if err != nil {
-			time.Sleep(interestedTimeout * time.Second)
-			continue
-		}
-		break
+	err = client.SendUnchoke()
+	if err != nil {
+		log.Printf("failed to send unchoke [%v]\n", err)
+		return
 	}
+	err = message.SendInterested(client.Conn)
+
 	if err != nil {
 		log.Printf("failed to send interested [%v]\n", err)
 		return
 	}
 
-	for {
-		if !client.Choked && len(client.Bitfield) > 0 {
-			startRequesting(client, workQueue, results, totalPieces, completedPieces)
-			return
-		}
-		m, err := message.ReadMessage(client.Conn)
-		if err != nil {
-			log.Printf("could not read message: %v\n", err)
-			return
-		}
-
-		if m == nil {
-			continue // keep-alive
-		}
-
-		switch m.Name() {
-		case "Unchoke":
-			client.Choked = false
-			log.Printf("Unchoked\n")
-
-		case "Choke":
-			client.Choked = true
-			log.Printf("Choked\n")
-
-		case "Bitfield":
-			client.Bitfield, _ = message.ParseBitfield(m)
-			log.Printf("Bitfield\n")
-
-		default:
-			log.Printf("Unexpected message type: %v\n", m.Name())
-		}
-	}
-
-}
-
-func startRequesting(client *clientImport.Client, workQueue chan *Work, results chan *WorkResults, completedPieces *int64, totalPieces *int64) {
-	retries := 0
-	for {
+	for work := range workQueue {
 		if atomic.LoadInt64(completedPieces) == *totalPieces {
 			return
 		}
-		select {
-		case assignedWork := <-workQueue:
-			if retries > maxRetries {
-				log.Printf(fmt.Sprintf("client: [%v]: used allocated retrys", client.Peer.IP))
-				return
-			}
-			if !client.Bitfield.HasPiece(assignedWork.Index) {
-				workQueue <- assignedWork
-				retries++
-				continue
-			}
 
-			buf, err := attemptPieceDownload(client, assignedWork)
-			// Failed to download, client lied, set bitmap to 0, place work back in channel
-			if err != nil {
-				workQueue <- assignedWork
-				retries++
-				client.Bitfield.ClearPiece(assignedWork.Index)
-				continue
-			}
-			// Verify
-			err = compareHash(assignedWork, buf)
-			if err != nil {
-				workQueue <- assignedWork
-				client.Bitfield.ClearPiece(assignedWork.Index)
-				retries++
-				continue
-			}
-			_ = client.SendHave(assignedWork.Index)
-			log.Printf(fmt.Sprintf("finished piece [%d]", assignedWork.Index))
-			results <- &WorkResults{PieceIndex: assignedWork.Index, Buf: buf}
-			atomic.AddInt64(completedPieces, 1)
-		case <-time.After(workRetrievalTimeout * time.Second):
-			log.Printf("work retrieval timeout\n")
+		if !client.Bitfield.HasPiece(work.Index) {
+			workQueue <- work
+			continue
+		}
+
+		buf, err := attemptPieceDownload(client, work)
+		if err != nil {
+			log.Printf("failed to download piece [%d], %v\n", work.Index, err)
+			workQueue <- work
 			return
 		}
 
+		err = compareHash(work, buf)
+		if err != nil {
+			log.Printf("failed hash check [%d]\n", work.Index)
+			workQueue <- work
+			continue
+		}
+
+		client.SendHave(work.Index)
+		results <- &WorkResults{PieceIndex: work.Index, Buf: buf}
+		atomic.AddInt64(completedPieces, 1)
 	}
 }
 
@@ -213,9 +161,10 @@ func attemptPieceDownload(client *clientImport.Client, work *Work) ([]byte, erro
 		Backlog:    0,
 	}
 
+	// If we don't get it in 30 seconds assume we are not getting a response
+	client.Conn.SetDeadline(time.Now().Add(downloadTimeoutFactor * time.Second))
+	defer client.Conn.SetDeadline(time.Time{})
 	for workProgress.Downloaded < work.Length {
-
-		// If we don't get it in 30 seconds assume we are not getting a response
 		if !workProgress.Client.Choked {
 			for workProgress.Backlog < maxBacklog && workProgress.Requested < work.Length {
 				currentRequestSize := requestSize
@@ -224,7 +173,7 @@ func attemptPieceDownload(client *clientImport.Client, work *Work) ([]byte, erro
 				}
 				err := client.SendRequest(work.Index, workProgress.Requested, currentRequestSize)
 				if err != nil {
-					return nil, err
+					return nil, errors.New(fmt.Sprintf("failed to send request [%d], [%v]\n", work.Index, err))
 				}
 				workProgress.Requested += currentRequestSize
 				workProgress.Backlog += 1
@@ -232,7 +181,7 @@ func attemptPieceDownload(client *clientImport.Client, work *Work) ([]byte, erro
 		}
 		err := workProgress.ReadMessage()
 		if err != nil {
-			return nil, err
+			return nil, errors.New(fmt.Sprintf("failed to read response [%d], [%v]\n", work.Index, err))
 		}
 	}
 

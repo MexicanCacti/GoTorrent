@@ -29,7 +29,10 @@ type Progress struct {
 }
 
 func (workProgress *Progress) ReadMessage() error {
-	msg, _ := workProgress.Client.Read()
+	msg, err := workProgress.Client.Read()
+	if err != nil {
+		return err
+	}
 	// Keep alive
 	if msg == nil {
 		return nil
@@ -40,14 +43,23 @@ func (workProgress *Progress) ReadMessage() error {
 	case message.MsgChoke:
 		workProgress.Client.Choked = true
 	case message.MsgHave:
-		index, _ := message.ParseHave(msg)
+		index, err := message.ParseHave(msg)
+		if err != nil {
+			return err
+		}
 		workProgress.Client.Bitfield.SetPiece(index)
 	case message.MsgPiece:
-		dataAmount, _ := message.ParsePiece(workProgress.Index, workProgress.Buf, msg)
+		dataAmount, err := message.ParsePiece(workProgress.Index, workProgress.Buf, msg)
+		if err != nil {
+			return err
+		}
 		workProgress.Downloaded += dataAmount
 		workProgress.Backlog -= 1
 	case message.MsgBitfield:
-		workProgress.Client.Bitfield, _ = message.ParseBitfield(msg)
+		workProgress.Client.Bitfield, err = message.ParseBitfield(msg)
+		if err != nil {
+			return err
+		}
 	}
 	return nil
 }

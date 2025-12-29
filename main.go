@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 )
 
 const portNum int = 7777
@@ -80,6 +81,14 @@ func main() {
 
 	var downloadedPieces int64 = 0
 	log.Printf("Total Pieces: %d\n", totalPieces)
+	go func() {
+		for {
+			if atomic.LoadInt64(&writtenPieces) == totalPieces {
+				close(workQueue)
+				return
+			}
+		}
+	}()
 
 	var torrentGroup sync.WaitGroup
 	for i, peer := range *peerList {
@@ -89,7 +98,6 @@ func main() {
 	}
 	torrentGroup.Wait()
 	log.Println("TORRENT GROUP DONE")
-	close(workQueue)
 	writeGroup.Wait()
 	log.Println("WRITE GROUP DONE")
 	close(results)
